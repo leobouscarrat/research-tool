@@ -24,4 +24,4 @@ wheels/
 
 data/themes/*
 themes.json
-logs/*
+logs/*.log

@@ -18,61 +18,42 @@ STRICT RULES:
 
 SCORING_SYSTEM_PROMPT = """You are an academic paper relevance evaluator.
 
-You will receive a research subject and a list of papers. Score each paper.
+You will receive a research subject and a single paper. Score it.
 
 STRICT RULES:
-- Score every paper from 1 to 10 based on relevance to the research subject
+- Score the paper from 1 to 10 based on relevance to the research subject
 - relevance_score MUST be an integer between 1 and 10
 - Provide a brief justification in the user's language
-- Respond ONLY with a valid JSON array, nothing else
+- Respond ONLY with a valid JSON object, nothing else
 
 REQUIRED FORMAT:
-[
-  {
-    "paper_id": "id_from_the_input_list",
-    "title": "Paper title",
-    "authors": "Author 1, Author 2",
-    "published": "2023",
-    "abstract": "Abstract...",
-    "relevance_score": 8,
-    "justification": "Pertinent car..."
-  }
-]
-
-IMPORTANT: Use the exact paper_id from the input list. Do not invent or modify IDs."""
+{
+  "relevance_score": 8,
+  "justification": "Pertinent car..."
+}"""
 
 
-def _extract_papers_from_response(content: str) -> list[dict] | None:
-    candidates = []
-
-    for match in re.finditer(r'```json\s*(\[.*?\])\s*```', content, re.DOTALL):
+def _extract_score_from_response(content: str) -> dict | None:
+    """Extrait un objet JSON {relevance_score, justification} depuis la réponse du LLM."""
+    # Tente d'abord un bloc ```json ... ```
+    for match in re.finditer(r'```json\s*(\{.*?\})\s*```', content, re.DOTALL):
         try:
             parsed = json.loads(match.group(1))
-            if isinstance(parsed, list):
-                candidates.append(parsed)
+            if "relevance_score" in parsed:
+                return parsed
         except json.JSONDecodeError:
             pass
 
-    for match in re.finditer(r'\[\s*\{.*?\}\s*\]', content, re.DOTALL):
+    # Tente un objet JSON brut
+    for match in re.finditer(r'\{[^{}]*\}', content, re.DOTALL):
         try:
             parsed = json.loads(match.group(0))
-            if isinstance(parsed, list):
-                candidates.append(parsed)
+            if "relevance_score" in parsed:
+                return parsed
         except json.JSONDecodeError:
             pass
 
-    if not candidates:
-        return None
-
-    ranked = sorted(
-        candidates,
-        key=lambda c: sum(1 for p in c if "relevance_score" in p or "score" in p),
-        reverse=True
-    )
-    best = ranked[0]
-    if not any("relevance_score" in p or "score" in p for p in best):
-        return None
-    return best
+    return None
 
 
 def _normalize_from_cache(paper: dict, active_sources: list) -> NormalizedPaper | None:
@@ -178,69 +159,98 @@ def _run_search_phase(
             return content, [], updated_messages
 
 
-def _run_scoring_phase(
+def _score_single_paper(
+    llm,
     subject: str,
-    raw_papers: list[dict],
-    active_sources: list[str],
-    min_score: int = 5
-) -> list[NormalizedPaper]:
-
-    llm = ChatOllama(model="qwen3.5:9b", temperature=0)
-
-    papers_for_scoring = json.dumps([
-        {
-            "paper_id": p.get("id", p.get("arxiv_id", p.get("paper_id"))),
-            "title": p.get("t", p.get("title")),
-            "authors": p.get("a", p.get("authors")),
-            "published": p.get("y", p.get("published")),
-            "abstract": p.get("s", p.get("abstract"))
-        }
-        for p in raw_papers
-    ], ensure_ascii=False, separators=(",", ":"))
+    paper: dict,
+) -> dict | None:
+    """Score un seul papier. Retourne {relevance_score, justification} ou None."""
+    paper_id = paper.get("id", paper.get("arxiv_id", paper.get("paper_id")))
+    abstract = paper.get("s", paper.get("abstract", ""))  # abstract complet
 
     scoring_messages = [
         SystemMessage(content=SCORING_SYSTEM_PROMPT),
         HumanMessage(content=(
             f"Research subject: {subject}\n\n"
-            f"Papers to score:\n{papers_for_scoring}\n\n"
-            f"Return ONLY the JSON array."
+            f"Paper to score:\n"
+            f"Title: {paper.get('t', paper.get('title', ''))}\n"
+            f"Authors: {paper.get('a', paper.get('authors', ''))}\n"
+            f"Published: {paper.get('y', paper.get('published', ''))}\n"
+            f"Abstract: {abstract}\n\n"
+            f"Return ONLY the JSON object."
         ))
     ]
 
-    logger.debug(f"=== Phase 2 : Scoring de {len(raw_papers)} papiers ===")
     response = llm.invoke(scoring_messages)
-    scored_papers = _extract_papers_from_response(response.content.strip())
-    logger.debug(f"Réponse brute du scoring : {response.content.strip()[:500]}")
+    result = _extract_score_from_response(response.content.strip())
 
-    if not scored_papers:
-        logger.warning("Échec scoring, tentative correction")
+    if not result:
+        # Tentative de correction
         correction = llm.invoke(scoring_messages + [HumanMessage(
-            content=f"Invalid format. Return ONLY the JSON array. Subject: {subject}"
+            content="Invalid format. Return ONLY a JSON object with relevance_score (int 1-10) and justification."
         )])
-        logger.debug(f"Réponse de correction : {correction.content.strip()[:500]}")
-        scored_papers = _extract_papers_from_response(correction.content.strip())
+        result = _extract_score_from_response(correction.content.strip())
 
-    if not scored_papers:
-        logger.error("Échec total du scoring")
-        return []
+    if result:
+        result["paper_id"] = paper_id
+    return result
+
+
+def _run_scoring_phase(
+    subject: str,
+    raw_papers: list[dict],
+    active_sources: list[str],
+    min_score: int = 5,
+    steps_callback=None
+) -> list[NormalizedPaper]:
+
+    llm = ChatOllama(model="qwen3.5:9b", temperature=0)
+    total = len(raw_papers)
+    logger.debug(f"=== Phase 2 : Scoring de {total} papiers (1 par 1) ===")
 
     enriched = []
-    for paper in scored_papers:
-        normalized = _normalize_from_cache(paper, active_sources)
-        if not normalized:
+    failed = 0
+
+    for i, paper in enumerate(raw_papers):
+        paper_id = paper.get("id", paper.get("arxiv_id", paper.get("paper_id")))
+        logger.debug(f"Scoring [{i+1}/{total}] : {paper.get('t', paper.get('title', ''))[:60]}")
+
+        if steps_callback:
+            steps_callback({
+                "type": "scoring_progress",
+                "current": i + 1,
+                "total": total
+            })
+
+        scored = _score_single_paper(llm, subject, paper)
+        if not scored:
+            logger.warning(f"Échec scoring pour {paper_id}, papier ignoré")
+            failed += 1
             continue
 
         try:
-            score = int(normalized.relevance_score)
+            score = int(scored.get("relevance_score", 0))
         except (ValueError, TypeError):
             score = 0
 
-        if score >= min_score:
-            normalized.relevance_score = score
-            enriched.append(normalized)
+        if score < min_score:
+            logger.debug(f"Score {score} < {min_score}, papier écarté : {paper_id}")
+            continue
+
+        normalized = _normalize_from_cache({"paper_id": paper_id, **scored}, active_sources)
+        if not normalized:
+            logger.warning(f"Papier introuvable en cache : {paper_id}")
+            continue
+
+        normalized.relevance_score = score
+        normalized.justification = scored.get("justification", "—")
+        enriched.append(normalized)
 
     enriched.sort(key=lambda p: p.relevance_score, reverse=True)
-    logger.success(f"Phase 2 — {len(enriched)}/{len(scored_papers)} papiers retenus (score ≥ {min_score})")
+    logger.success(
+        f"Phase 2 — {len(enriched)}/{len(raw_papers)} papiers retenus "
+        f"(score ≥ {min_score}, {failed} échecs)"
+    )
     return enriched
 
 
@@ -293,5 +303,5 @@ def run_research_agent_turn(
         "the research subject"
     )
 
-    scored = _run_scoring_phase(original_subject, raw_papers, active_sources, min_score)
+    scored = _run_scoring_phase(original_subject, raw_papers, active_sources, min_score, steps_callback)
     return None, scored, updated_messages

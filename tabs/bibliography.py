@@ -94,12 +94,6 @@ def render(active_slug: str | None, themes: dict):
 
         placeholder = "Réponds à l'agent..." if agent_is_waiting else "Décris ton sujet de recherche..."
 
-        min_score = st.slider(
-            "Score minimum pour afficher un papier",
-            min_value=1, max_value=10, value=5,
-            help="Les papiers en dessous de ce score seront exclus"
-        )
-        
         if user_input := st.chat_input(placeholder):
             st.session_state[search_chat_key].append({
                 "role": "user",
@@ -126,8 +120,10 @@ def render(active_slug: str | None, themes: dict):
                             elif s["type"] == "tool_result":
                                 source_label = "Semantic Scholar" if s.get("source") == "semantic_scholar_search" else "ArXiv"
                                 st.write(f"📄 {s['count']} papiers récupérés via {source_label}")
-                            elif s["type"] == "tool_result":
-                                st.write(f"📄 {s['count']} papiers récupérés")
+                            elif s["type"] == "scoring_progress":
+                                current, total = s["current"], s["total"]
+                                st.write(f"🧠 Notation : {current}/{total} papiers")
+                                st.progress(current / total)
 
                 with st.spinner(""):
                     is_first_message = len(st.session_state[search_agent_messages_key]) == 1
@@ -176,13 +172,13 @@ def render(active_slug: str | None, themes: dict):
             st.subheader(f"📋 {len(suggested)} papiers proposés — {selected_count} sélectionnés")
         with col_accept_all:
             if st.button("✅ Tout accepter", use_container_width=True):
-                for paper_id in selections:
-                    st.session_state["paper_selections"][paper_id] = True
+                for arxiv_id in selections:
+                    st.session_state["paper_selections"][arxiv_id] = True
                 st.rerun()
         with col_reject_all:
             if st.button("❌ Tout refuser", use_container_width=True):
-                for paper_id in selections:
-                    st.session_state["paper_selections"][paper_id] = False
+                for arxiv_id in selections:
+                    st.session_state["paper_selections"][arxiv_id] = False
                 st.rerun()
 
         st.markdown("---")

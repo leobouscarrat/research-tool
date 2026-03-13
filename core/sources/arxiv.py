@@ -27,7 +27,7 @@ def arxiv_search(query: str, max_results: int = 15) -> str:
             "t": paper.title,
             "a": ", ".join(a.name.split()[-1] for a in paper.authors[:2]),
             "y": str(paper.published.year),
-            "s": paper.summary[:200],
+            "s": paper.summary[:1000],
             "source": "arxiv"
         })
     logger.info(f"ArXiv : {len(results)} papiers récupérés")
