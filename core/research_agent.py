@@ -1,17 +1,24 @@
 import json
 import re
+
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_ollama import ChatOllama
-from langchain_core.messages import HumanMessage, ToolMessage, SystemMessage
+
 from core.logger import logger
 from core.sources import AVAILABLE_SOURCES
 from core.sources.base import NormalizedPaper
+
+SEARCH_MODEL = "qwen3.5:9b"
+SCORING_MODEL = "qwen2.5:3b"
+
+MAX_SEARCH_TOOL_CALLS = 8
 
 SEARCH_SYSTEM_PROMPT = """You are an academic paper search specialist. You have ONE job: search for papers.
 
 STRICT RULES:
 - Generate 2-3 optimized search queries in English using academic terms
-- Call the available search tools for each query
-- If multiple search tools are available, use each of them for better coverage
+- You have a budget of {max_tool_calls} tool calls maximum in total — use them wisely across all sources
+- If multiple search tools are available, split your queries across them for better coverage
 - If the subject is too vague, ask exactly ONE clarifying question in the user's language
 - Never comment on results, never summarize, never score papers
 - After all searches are done, respond with exactly: SEARCH_COMPLETE"""
@@ -31,6 +38,10 @@ REQUIRED FORMAT:
   "relevance_score": 8,
   "justification": "Pertinent car..."
 }"""
+
+
+def _get_paper_id(paper: dict) -> str | None:
+    return paper.get("id") or paper.get("paper_id") or paper.get("arxiv_id")
 
 
 def _extract_score_from_response(content: str) -> dict | None:
@@ -58,7 +69,7 @@ def _extract_score_from_response(content: str) -> dict | None:
 
 def _normalize_from_cache(paper: dict, active_sources: list) -> NormalizedPaper | None:
     """Reconstruit un NormalizedPaper depuis les caches des sources actives."""
-    paper_id = paper.get("paper_id") or paper.get("arxiv_id") or paper.get("id")
+    paper_id = _get_paper_id(paper)
     if not paper_id:
         return None
 
@@ -92,7 +103,7 @@ def _run_search_phase(
         logger.error("Aucun tool de recherche disponible")
         return None, [], messages
 
-    llm = ChatOllama(model="qwen3.5:9b", temperature=0)
+    llm = ChatOllama(model=SEARCH_MODEL, temperature=0)
     llm_with_tools = llm.bind_tools(tools)
 
     existing_ids_block = ""
@@ -101,7 +112,11 @@ def _run_search_phase(
         existing_ids_block = f"\n\nALREADY INDEXED - DO NOT retrieve these:\n{ids_list}"
 
     sources_block = "\nAvailable search tools: " + ", ".join(s.tool.name for s in sources)
-    system_prompt = SEARCH_SYSTEM_PROMPT + sources_block + existing_ids_block
+    system_prompt = (
+        SEARCH_SYSTEM_PROMPT.format(max_tool_calls=MAX_SEARCH_TOOL_CALLS)
+        + sources_block
+        + existing_ids_block
+    )
 
     original_subject = next(
         (m.content for m in messages if isinstance(m, HumanMessage)),
@@ -114,6 +129,7 @@ def _run_search_phase(
 
     updated_messages = list(full_messages)
     collected_papers: list[dict] = []
+    tool_call_count = 0
 
     # Map tool_name → source pour le dispatch
     tool_map = {s.tool.name: s.tool for s in sources}
@@ -124,6 +140,10 @@ def _run_search_phase(
 
         if response.tool_calls:
             for tc in response.tool_calls:
+                if tool_call_count >= MAX_SEARCH_TOOL_CALLS:
+                    logger.warning(f"Limite de {MAX_SEARCH_TOOL_CALLS} appels atteinte, recherche arrêtée")
+                    break
+
                 tool_name = tc["name"]
                 logger.info(f"Recherche [{tool_name}] : query='{tc['args'].get('query')}'")
 
@@ -136,6 +156,7 @@ def _run_search_phase(
                     continue
 
                 tool_result = tool_fn.invoke(tc["args"])
+                tool_call_count += 1
 
                 try:
                     results = json.loads(tool_result)
@@ -143,14 +164,18 @@ def _run_search_phase(
                     logger.info(f"{len(results)} papiers via {tool_name} (total: {len(collected_papers)})")
                     if steps_callback:
                         steps_callback({"type": "tool_result", "count": len(results), "source": tool_name})
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Parsing résultat [{tool_name}] ignoré : {e}")
 
                 updated_messages.append(ToolMessage(
                     content=f"[REMINDER: Searching for: {original_subject}]\n\n{tool_result}",
                     tool_call_id=tc["id"],
                     name=tool_name
                 ))
+
+            if tool_call_count >= MAX_SEARCH_TOOL_CALLS:
+                logger.success(f"Phase 1 terminée (limite atteinte) — {len(collected_papers)} papiers collectés")
+                return None, collected_papers, updated_messages
         else:
             content = response.content.strip()
             if "SEARCH_COMPLETE" in content or collected_papers:
@@ -165,7 +190,7 @@ def _score_single_paper(
     paper: dict,
 ) -> dict | None:
     """Score un seul papier. Retourne {relevance_score, justification} ou None."""
-    paper_id = paper.get("id", paper.get("arxiv_id", paper.get("paper_id")))
+    paper_id = _get_paper_id(paper)
     abstract = paper.get("s", paper.get("abstract", ""))  # abstract complet
 
     scoring_messages = [
@@ -201,26 +226,21 @@ def _run_scoring_phase(
     raw_papers: list[dict],
     active_sources: list[str],
     min_score: int = 5,
-    steps_callback=None
+    steps_callback=None,
 ) -> list[NormalizedPaper]:
 
-    llm = ChatOllama(model="qwen3.5:9b", temperature=0)
     total = len(raw_papers)
-    logger.debug(f"=== Phase 2 : Scoring de {total} papiers (1 par 1) ===")
+    logger.debug(f"=== Phase 2 : Scoring de {total} papiers (modèle: {SCORING_MODEL}) ===")
 
-    enriched = []
+    llm = ChatOllama(model=SCORING_MODEL, temperature=0)
+    enriched: list[NormalizedPaper] = []
     failed = 0
 
     for i, paper in enumerate(raw_papers):
-        paper_id = paper.get("id", paper.get("arxiv_id", paper.get("paper_id")))
-        logger.debug(f"Scoring [{i+1}/{total}] : {paper.get('t', paper.get('title', ''))[:60]}")
+        paper_id = _get_paper_id(paper)
 
         if steps_callback:
-            steps_callback({
-                "type": "scoring_progress",
-                "current": i + 1,
-                "total": total
-            })
+            steps_callback({"type": "scoring_progress", "current": i + 1, "total": total})
 
         scored = _score_single_paper(llm, subject, paper)
         if not scored:
@@ -240,6 +260,7 @@ def _run_scoring_phase(
         normalized = _normalize_from_cache({"paper_id": paper_id, **scored}, active_sources)
         if not normalized:
             logger.warning(f"Papier introuvable en cache : {paper_id}")
+            failed += 1
             continue
 
         normalized.relevance_score = score

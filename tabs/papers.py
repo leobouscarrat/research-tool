@@ -1,6 +1,8 @@
-import streamlit as st
 from datetime import datetime
-from core.theme_manager import get_papers, get_paper_count, sync_papers_from_disk
+
+import streamlit as st
+
+from core.theme_manager import get_paper_count, get_papers, sync_papers_from_disk
 
 
 def render(active_slug: str | None, themes: dict):
@@ -47,10 +49,12 @@ def render(active_slug: str | None, themes: dict):
                 st.write(f"**Auteurs :** {paper['authors']}")
                 st.write(f"**Publié :** {paper['published']}")
                 source = paper.get("source", "arxiv")
-                external_url = paper.get("external_url") or f"https://arxiv.org/abs/{paper['paper_id']}"
                 source_label = "Semantic Scholar" if source == "semantic_scholar" else "ArXiv"
+                fallback = f"https://arxiv.org/abs/{paper['paper_id']}" if source == "arxiv" else None
+                external_url = paper.get("external_url") or fallback
                 st.write(f"**ID :** `{paper['paper_id']}`")
-                st.link_button(f"🔗 Voir sur {source_label}", external_url)
+                if external_url:
+                    st.link_button(f"🔗 Voir sur {source_label}", external_url)
             with col_date:
                 st.caption(f"Ajouté le {added_at}")
             st.markdown(f"**Abstract :** {paper['abstract']}")

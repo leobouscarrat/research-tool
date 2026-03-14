@@ -1,9 +1,11 @@
 import json
-import requests
 from pathlib import Path
+
+import requests
 from langchain_core.tools import tool
-from core.sources.base import PaperSource, NormalizedPaper
+
 from core.logger import logger
+from core.sources.base import NormalizedPaper, PaperSource
 
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 FIELDS = "paperId,title,authors,year,abstract,externalIds,openAccessPdf"
@@ -19,7 +21,7 @@ def semantic_scholar_search(query: str, max_results: int = 15) -> str:
         response = requests.get(SEMANTIC_SCHOLAR_API, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         logger.error(f"Semantic Scholar API error: {e}")
         return json.dumps([])
 
@@ -31,6 +33,7 @@ def semantic_scholar_search(query: str, max_results: int = 15) -> str:
         cache_id = arxiv_id if arxiv_id else f"ss_{paper_id}"
         pdf_url = (paper.get("openAccessPdf") or {}).get("url")
 
+        full_abstract = paper.get("abstract") or ""
         _cache[cache_id] = {
             "paperId": paper_id,
             "arxiv_id": arxiv_id,
@@ -38,7 +41,7 @@ def semantic_scholar_search(query: str, max_results: int = 15) -> str:
             "title": paper.get("title", ""),
             "authors": ", ".join(a["name"] for a in paper.get("authors", [])[:3]),
             "year": str(paper.get("year") or ""),
-            "abstract": (paper.get("abstract") or "")[:500] + "...",
+            "abstract": full_abstract[:500] + ("..." if len(full_abstract) > 500 else ""),
             "pdf_url": pdf_url,
             "source": "semantic_scholar"
         }

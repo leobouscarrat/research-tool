@@ -1,6 +1,9 @@
 import json
-from pathlib import Path
+import shutil
 from datetime import datetime
+from pathlib import Path
+
+from core.logger import logger
 
 THEMES_FILE = Path("./data/themes.json")
 THEMES_DIR = Path("./data/themes")
@@ -43,7 +46,6 @@ def create_theme(name: str) -> bool:
     return True
 
 def delete_theme(slug: str):
-    import shutil
     data = _load()
     if slug in data:
         del data[slug]
@@ -62,7 +64,6 @@ def update_theme_stats(slug: str, keywords: str, papers_added: int):
     data = _load()
     if slug in data:
         data[slug]["last_search"] = datetime.now().isoformat()
-        # Supprime : data[slug]["paper_count"] += papers_added
         data[slug]["searches"].append({
             "keywords": keywords,
             "papers_added": papers_added,
@@ -126,7 +127,6 @@ def sync_papers_from_disk(slug: str):
     # Log les écarts
     removed = current_ids - pdf_ids
     if removed:
-        from core.logger import logger
         logger.warning(f"sync_papers_from_disk : {len(removed)} entrées sans PDF supprimées : {removed}")
 
     data[slug]["papers"] = synced

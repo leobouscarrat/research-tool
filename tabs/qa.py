@@ -1,6 +1,7 @@
 import streamlit as st
+
 from core.rag_agent import ask
-from core.theme_manager import save_chat_history, load_chat_history, get_paper_count
+from core.theme_manager import get_paper_count, load_chat_history, save_chat_history
 
 
 def render(active_slug: str | None, themes: dict):

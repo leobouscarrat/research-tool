@@ -1,5 +1,6 @@
-import streamlit as st
 from datetime import datetime
+
+import streamlit as st
 from langchain_core.messages import HumanMessage
 
 from core.paper_fetcher import download_and_index
@@ -80,7 +81,7 @@ def render(active_slug: str | None, themes: dict):
 
     # ── Input utilisateur ─────────────────────────────────────────────────────
     if not st.session_state.get("suggested_papers"):
-    
+
         # Si le dernier message est une question de l'agent, on l'affiche en évidence
         last_messages = st.session_state[search_chat_key]
         agent_is_waiting = (

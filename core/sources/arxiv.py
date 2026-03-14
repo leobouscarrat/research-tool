@@ -1,10 +1,11 @@
-import arxiv
 import json
-import requests
 from pathlib import Path
+
+import arxiv
 from langchain_core.tools import tool
-from core.sources.base import PaperSource, NormalizedPaper
+
 from core.logger import logger
+from core.sources.base import NormalizedPaper, PaperSource
 
 _cache: dict[str, arxiv.Result] = {}
 
@@ -57,7 +58,7 @@ class ArxivSource(PaperSource):
             title=cached.title,
             authors=", ".join(a.name for a in cached.authors[:3]),
             published=str(cached.published.date()),
-            abstract=cached.summary[:500] + "...",
+            abstract=cached.summary[:500] + ("..." if len(cached.summary) > 500 else ""),
             source="arxiv",
             pdf_url=cached.pdf_url,
             external_url=f"https://arxiv.org/abs/{paper_id}",

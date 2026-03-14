@@ -1,5 +1,6 @@
-from loguru import logger
 import sys
+
+from loguru import logger
 
 logger.remove()  # Supprime le handler par défaut
 logger.add(

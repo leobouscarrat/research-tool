@@ -1,9 +1,14 @@
-import streamlit as st
 from datetime import datetime
 
+import streamlit as st
+
 from core.theme_manager import (
-    list_themes, create_theme, delete_theme, rename_theme,
-    get_paper_count, sync_papers_from_disk
+    create_theme,
+    delete_theme,
+    get_paper_count,
+    list_themes,
+    rename_theme,
+    sync_papers_from_disk,
 )
 from tabs import bibliography, papers, qa
 

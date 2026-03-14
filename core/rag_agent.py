@@ -1,8 +1,11 @@
-from langchain_ollama import ChatOllama
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
-from core.vector_store import get_vectorstore
+from langchain_ollama import ChatOllama
+
 from core.logger import logger
+from core.vector_store import get_vectorstore
+
+LLM_MODEL = "qwen3.5:9b"
 
 RAG_SYSTEM_PROMPT = """You are an expert research assistant specialized in academic papers.
 
@@ -33,7 +36,7 @@ def ask(question: str, slug: str, history: list[dict]) -> str:
         logger.info(f"RAG : {len(retrieved_docs)} chunks récupérés pour '{query}'")
         return serialized
 
-    llm = ChatOllama(model="qwen3.5:9b", temperature=0)
+    llm = ChatOllama(model=LLM_MODEL, temperature=0)
     llm_with_tools = llm.bind_tools([retrieve_context])
     tool_map = {"retrieve_context": retrieve_context}
 

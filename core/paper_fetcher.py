@@ -1,11 +1,14 @@
 from pathlib import Path
+
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
-from core.vector_store import get_vectorstore
-from core.theme_manager import update_theme_stats, add_paper
-from core.sources.base import NormalizedPaper
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from core.logger import logger
+from core.sources import AVAILABLE_SOURCES
+from core.sources.base import NormalizedPaper
+from core.theme_manager import add_paper, update_theme_stats
+from core.vector_store import get_vectorstore
 
 
 def download_and_index(slug: str, papers: list[NormalizedPaper]) -> int:
@@ -18,7 +21,6 @@ def download_and_index(slug: str, papers: list[NormalizedPaper]) -> int:
 
     for paper in papers:
         # Tente le téléchargement PDF
-        from core.sources import AVAILABLE_SOURCES
         source = AVAILABLE_SOURCES.get(paper.source)
         pdf_path = source.download_pdf(paper, str(pdf_dir)) if source else None
 
