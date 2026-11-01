@@ -56,7 +56,17 @@ uv sync
 uv run streamlit run app.py
 ```
 
+### MCP server
+
+`mcp_server.py` exposes the research functions (themes, search, indexing, Q&A) as an MCP server, e.g. for Claude Code:
+
+```bash
+claude mcp add research-tool -- /path/to/research_tool/mcp_server.sh
+```
+
 ## Configuration
+
+Copy `.env.example` to `.env` and fill in the values.
 
 | Environment variable | Description | Default |
 |---|---|---|
