@@ -15,6 +15,7 @@ dependencies = [
     "loguru>=0.7.3",
     "pymupdf>=1.27.1",
     "pypdf>=6.7.5",
+    "mcp[cli]>=1.0.0",
     "requests>=2.32.5",
     "streamlit>=1.55.0",
 ]

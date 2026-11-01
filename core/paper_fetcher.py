@@ -11,7 +11,7 @@ from core.theme_manager import add_paper, update_theme_stats
 from core.vector_store import get_vectorstore
 
 
-def download_and_index(slug: str, papers: list[NormalizedPaper]) -> int:
+def download_and_index(slug: str, papers: list[NormalizedPaper], subject: str = "") -> int:
     pdf_dir = Path(f"./data/themes/{slug}/pdfs")
     pdf_dir.mkdir(parents=True, exist_ok=True)
 
@@ -53,7 +53,7 @@ def download_and_index(slug: str, papers: list[NormalizedPaper]) -> int:
         logger.info(f"Indexé : {paper.title[:60]} ({paper.source})")
 
     if indexed_count > 0:
-        keywords = ", ".join(p.title for p in papers[:3])
+        keywords = subject or ", ".join(p.title for p in papers[:3])
         update_theme_stats(slug, keywords, indexed_count)
 
     return indexed_count

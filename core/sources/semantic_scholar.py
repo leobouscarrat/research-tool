@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import requests
@@ -6,6 +7,11 @@ from langchain_core.tools import tool
 
 from core.logger import logger
 from core.sources.base import NormalizedPaper, PaperSource
+
+
+def _get_headers() -> dict:
+    api_key = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
+    return {"x-api-key": api_key} if api_key else {}
 
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 FIELDS = "paperId,title,authors,year,abstract,externalIds,openAccessPdf"
@@ -18,7 +24,9 @@ def semantic_scholar_search(query: str, max_results: int = 15) -> str:
     """Search Semantic Scholar for academic papers matching a query."""
     params = {"query": query, "limit": max_results, "fields": FIELDS}
     try:
-        response = requests.get(SEMANTIC_SCHOLAR_API, params=params, timeout=10)
+        response = PaperSource.request_with_retry(
+            SEMANTIC_SCHOLAR_API, params=params, headers=_get_headers(), timeout=10
+        )
         response.raise_for_status()
         data = response.json()
     except requests.exceptions.RequestException as e:
@@ -101,7 +109,7 @@ class SemanticScholarSource(PaperSource):
             return str(pdf_path)
 
         try:
-            response = requests.get(paper.pdf_url, timeout=30, stream=True)
+            response = PaperSource.request_with_retry(paper.pdf_url, timeout=30, stream=True)
             response.raise_for_status()
             with open(pdf_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=8192):

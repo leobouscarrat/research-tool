@@ -228,8 +228,12 @@ def render(active_slug: str | None, themes: dict):
             st.write(f"**{len(selected_papers)} papier(s) sélectionné(s)**")
         with col_button:
             if st.button("📥 Indexer la sélection", type="primary", use_container_width=True, disabled=not selected_papers):
+                subject = next(
+                    (m.content for m in st.session_state[search_agent_messages_key] if isinstance(m, HumanMessage)),
+                    ""
+                )
                 with st.spinner(f"Téléchargement et indexation de {len(selected_papers)} papiers..."):
-                    count = download_and_index(active_slug, selected_papers)
+                    count = download_and_index(active_slug, selected_papers, subject=subject)
                 st.success(f"✅ {count} papiers indexés !")
                 st.session_state.pop("suggested_papers", None)
                 st.session_state.pop("paper_selections", None)

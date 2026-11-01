@@ -1,7 +1,7 @@
 import json
 import re
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 
 from core.logger import logger
@@ -13,15 +13,21 @@ SCORING_MODEL = "qwen2.5:3b"
 
 MAX_SEARCH_TOOL_CALLS = 8
 
-SEARCH_SYSTEM_PROMPT = """You are an academic paper search specialist. You have ONE job: search for papers.
+PLANNING_SYSTEM_PROMPT = """You are an academic research query specialist.
 
-STRICT RULES:
-- Generate 2-3 optimized search queries in English using academic terms
-- You have a budget of {max_tool_calls} tool calls maximum in total — use them wisely across all sources
-- If multiple search tools are available, split your queries across them for better coverage
-- If the subject is too vague, ask exactly ONE clarifying question in the user's language
-- Never comment on results, never summarize, never score papers
-- After all searches are done, respond with exactly: SEARCH_COMPLETE"""
+Analyze the user's research subject and output search queries.
+
+RULES:
+- If the subject is too vague or ambiguous, respond with ONE clarifying question \
+in the user's language, prefixed with CLARIFICATION:
+- Otherwise, output ONLY a JSON array of search queries in English using precise academic terminology
+- Each query will be run on {source_count} source(s) — stay within a total budget of {max_tool_calls} searches
+- Queries should cover different angles: core concept, methods, applications, recent advances
+- No explanation, no preamble — only the JSON array or the CLARIFICATION: line
+
+Examples of valid outputs:
+["transformer attention mechanism survey", "self-attention NLP sequence modeling", "BERT GPT pretraining language model"]
+CLARIFICATION: Cherches-tu des papiers sur l'aspect théorique ou les applications industrielles ?"""
 
 SCORING_SYSTEM_PROMPT = """You are an academic paper relevance evaluator.
 
@@ -89,99 +95,107 @@ def _normalize_from_cache(paper: dict, active_sources: list) -> NormalizedPaper 
     return None
 
 
-def _run_search_phase(
-    messages: list,
-    existing_paper_ids: set[str],
-    active_sources: list[str],
-    steps_callback=None
-) -> tuple[str | None, list[dict], list]:
-
-    sources = [AVAILABLE_SOURCES[s] for s in active_sources if s in AVAILABLE_SOURCES]
-    tools = [s.tool for s in sources]
-
-    if not tools:
-        logger.error("Aucun tool de recherche disponible")
-        return None, [], messages
-
+def _run_query_planning_phase(messages: list, active_sources: list[str]) -> tuple[str | None, list[str]]:
+    """
+    Phase 0 : construit les requêtes de recherche à partir du sujet utilisateur.
+    Retourne (clarification, []) si le sujet est trop vague,
+    ou (None, queries) avec les requêtes prêtes à exécuter.
+    """
     llm = ChatOllama(model=SEARCH_MODEL, temperature=0)
-    llm_with_tools = llm.bind_tools(tools)
-
-    existing_ids_block = ""
-    if existing_paper_ids:
-        ids_list = "\n".join(f"- {pid}" for pid in existing_paper_ids)
-        existing_ids_block = f"\n\nALREADY INDEXED - DO NOT retrieve these:\n{ids_list}"
-
-    sources_block = "\nAvailable search tools: " + ", ".join(s.tool.name for s in sources)
-    system_prompt = (
-        SEARCH_SYSTEM_PROMPT.format(max_tool_calls=MAX_SEARCH_TOOL_CALLS)
-        + sources_block
-        + existing_ids_block
+    system_prompt = PLANNING_SYSTEM_PROMPT.format(
+        source_count=len(active_sources),
+        max_tool_calls=MAX_SEARCH_TOOL_CALLS,
     )
-
-    original_subject = next(
-        (m.content for m in messages if isinstance(m, HumanMessage)),
-        "the research subject"
-    )
-
-    full_messages = [SystemMessage(content=system_prompt)] + [
+    planning_messages = [SystemMessage(content=system_prompt)] + [
         m for m in messages if not isinstance(m, SystemMessage)
     ]
 
-    updated_messages = list(full_messages)
+    response = llm.invoke(planning_messages)
+    content = response.content.strip()
+
+    if content.startswith("CLARIFICATION:"):
+        question = content[len("CLARIFICATION:"):].strip()
+        logger.info("Phase 0 : clarification demandée")
+        return question, []
+
+    # Parse le tableau JSON de requêtes
+    try:
+        match = re.search(r'\[.*\]', content, re.DOTALL)
+        if match:
+            parsed = json.loads(match.group(0))
+            if isinstance(parsed, list) and parsed:
+                # Normalise : aplatit les éventuelles sous-listes, filtre les non-strings
+                flat: list[str] = []
+                for item in parsed:
+                    if isinstance(item, str) and item.strip():
+                        flat.append(item.strip())
+                    elif isinstance(item, list):
+                        flat.extend(s.strip() for s in item if isinstance(s, str) and s.strip())
+                if flat:
+                    logger.info(f"Phase 0 : {len(flat)} requêtes planifiées : {flat}")
+                    return None, flat
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Fallback : utilise le message brut de l'utilisateur
+    logger.warning("Phase 0 : parsing échoué, utilisation du sujet brut comme requête")
+    original = next((m.content for m in messages if isinstance(m, HumanMessage)), "")
+    return None, [original] if original else []
+
+
+def _run_search_phase(
+    queries: list[str],
+    existing_paper_ids: set[str],
+    active_sources: list[str],
+    steps_callback=None,
+) -> list[dict]:
+    """
+    Phase 1 : exécute les requêtes sur chaque source de manière programmatique.
+    Retourne la liste des papiers collectés (sans doublons, sans déjà indexés).
+    """
+    sources = [AVAILABLE_SOURCES[s] for s in active_sources if s in AVAILABLE_SOURCES]
+    if not sources:
+        logger.error("Aucune source de recherche disponible")
+        return []
+
     collected_papers: list[dict] = []
+    seen_paper_ids: set[str] = set(existing_paper_ids)  # exclut les déjà indexés
     tool_call_count = 0
 
-    # Map tool_name → source pour le dispatch
-    tool_map = {s.tool.name: s.tool for s in sources}
-
-    while True:
-        response = llm_with_tools.invoke(updated_messages)
-        updated_messages.append(response)
-
-        if response.tool_calls:
-            for tc in response.tool_calls:
-                if tool_call_count >= MAX_SEARCH_TOOL_CALLS:
-                    logger.warning(f"Limite de {MAX_SEARCH_TOOL_CALLS} appels atteinte, recherche arrêtée")
-                    break
-
-                tool_name = tc["name"]
-                logger.info(f"Recherche [{tool_name}] : query='{tc['args'].get('query')}'")
-
-                if steps_callback:
-                    steps_callback({"type": "tool_call", "tool": tool_name, "args": tc["args"]})
-
-                tool_fn = tool_map.get(tool_name)
-                if not tool_fn:
-                    logger.warning(f"Tool inconnu : {tool_name}")
-                    continue
-
-                tool_result = tool_fn.invoke(tc["args"])
-                tool_call_count += 1
-
-                try:
-                    results = json.loads(tool_result)
-                    collected_papers.extend(results)
-                    logger.info(f"{len(results)} papiers via {tool_name} (total: {len(collected_papers)})")
-                    if steps_callback:
-                        steps_callback({"type": "tool_result", "count": len(results), "source": tool_name})
-                except Exception as e:
-                    logger.debug(f"Parsing résultat [{tool_name}] ignoré : {e}")
-
-                updated_messages.append(ToolMessage(
-                    content=f"[REMINDER: Searching for: {original_subject}]\n\n{tool_result}",
-                    tool_call_id=tc["id"],
-                    name=tool_name
-                ))
-
+    for query in queries:
+        for source in sources:
             if tool_call_count >= MAX_SEARCH_TOOL_CALLS:
-                logger.success(f"Phase 1 terminée (limite atteinte) — {len(collected_papers)} papiers collectés")
-                return None, collected_papers, updated_messages
-        else:
-            content = response.content.strip()
-            if "SEARCH_COMPLETE" in content or collected_papers:
-                logger.success(f"Phase 1 terminée — {len(collected_papers)} papiers collectés")
-                return None, collected_papers, updated_messages
-            return content, [], updated_messages
+                logger.warning(f"Limite de {MAX_SEARCH_TOOL_CALLS} appels atteinte, recherche arrêtée")
+                break
+
+            logger.info(f"Recherche [{source.tool.name}] : query='{query}'")
+            if steps_callback:
+                steps_callback({"type": "tool_call", "tool": source.tool.name, "args": {"query": query}})
+
+            tool_result = source.tool.invoke({"query": query})
+            tool_call_count += 1
+
+            try:
+                results = json.loads(tool_result)
+                new_papers = [p for p in results if p.get("id") not in seen_paper_ids]
+                seen_paper_ids.update(p.get("id") for p in new_papers)
+                collected_papers.extend(new_papers)
+                dupes = len(results) - len(new_papers)
+                logger.info(
+                    f"{len(new_papers)} papiers via {source.tool.name}"
+                    + (f" ({dupes} doublons ignorés)" if dupes else "")
+                    + f" (total: {len(collected_papers)})"
+                )
+                if steps_callback:
+                    steps_callback({"type": "tool_result", "count": len(new_papers), "source": source.tool.name})
+            except Exception as e:
+                logger.debug(f"Parsing résultat [{source.tool.name}] ignoré : {e}")
+
+        if tool_call_count >= MAX_SEARCH_TOOL_CALLS:
+            break
+
+    logger.success(f"Phase 1 terminée — {len(collected_papers)} papiers collectés")
+    return collected_papers
 
 
 def _score_single_paper(
@@ -294,24 +308,24 @@ def run_research_agent_turn(
         logger.info(f"Caches vidés pour : {active_sources}")
 
     if steps_callback:
+        steps_callback({"type": "phase", "label": "🧭 Phase 0 : Planification des requêtes..."})
+
+    clarification, queries = _run_query_planning_phase(messages, active_sources)
+
+    if clarification:
+        return clarification, [], messages
+
+    if steps_callback:
         steps_callback({
             "type": "phase",
             "label": f"🔍 Phase 1 : Recherche sur {', '.join(active_sources)}..."
         })
 
-    clarification, raw_papers, updated_messages = _run_search_phase(
-        messages,
-        existing_paper_ids or set(),
-        active_sources,
-        steps_callback=steps_callback
-    )
-
-    if clarification:
-        return clarification, [], updated_messages
+    raw_papers = _run_search_phase(queries, existing_paper_ids or set(), active_sources, steps_callback)
 
     if not raw_papers:
         logger.error("Aucun papier trouvé")
-        return None, [], updated_messages
+        return None, [], messages
 
     if steps_callback:
         steps_callback({
@@ -325,4 +339,4 @@ def run_research_agent_turn(
     )
 
     scored = _run_scoring_phase(original_subject, raw_papers, active_sources, min_score, steps_callback)
-    return None, scored, updated_messages
+    return None, scored, messages

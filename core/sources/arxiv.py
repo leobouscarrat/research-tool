@@ -1,11 +1,12 @@
 import json
+import time
 from pathlib import Path
 
 import arxiv
 from langchain_core.tools import tool
 
 from core.logger import logger
-from core.sources.base import NormalizedPaper, PaperSource
+from core.sources.base import _BACKOFF_SECONDS, NormalizedPaper, PaperSource
 
 _cache: dict[str, arxiv.Result] = {}
 
@@ -20,7 +21,18 @@ def arxiv_search(query: str, max_results: int = 15) -> str:
         sort_by=arxiv.SortCriterion.Relevance
     )
     results = []
-    for paper in client.results(search):
+    raw_results = None
+    for attempt, wait in enumerate(_BACKOFF_SECONDS, start=1):
+        try:
+            raw_results = list(client.results(search))
+            break
+        except Exception as e:
+            logger.warning(f"ArXiv erreur (tentative {attempt}/{len(_BACKOFF_SECONDS)}) : {e} — attente {wait}s")
+            time.sleep(wait)
+    if raw_results is None:
+        logger.error("ArXiv : échec après toutes les tentatives")
+        return json.dumps([])
+    for paper in raw_results:
         arxiv_id = paper.entry_id.split("/")[-1]
         _cache[arxiv_id] = paper
         results.append({
@@ -69,13 +81,21 @@ class ArxivSource(PaperSource):
         pdf_path = Path(dest_dir) / f"{paper.paper_id}.pdf"
         if pdf_path.exists():
             return str(pdf_path)
-        try:
-            paper.raw.download_pdf(dirpath=dest_dir, filename=f"{paper.paper_id}.pdf")
-            logger.info(f"PDF téléchargé : {pdf_path}")
-            return str(pdf_path)
-        except Exception as e:
-            logger.error(f"Échec téléchargement ArXiv PDF {paper.paper_id}: {e}")
-            return None
+        for attempt, wait in enumerate(_BACKOFF_SECONDS, start=1):
+            try:
+                if pdf_path.exists():
+                    pdf_path.unlink()
+                paper.raw.download_pdf(dirpath=dest_dir, filename=f"{paper.paper_id}.pdf")
+                logger.info(f"PDF téléchargé : {pdf_path}")
+                return str(pdf_path)
+            except Exception as e:
+                logger.warning(
+                    f"Échec téléchargement ArXiv PDF {paper.paper_id} "
+                    f"(tentative {attempt}/{len(_BACKOFF_SECONDS)}) : {e} — attente {wait}s"
+                )
+                time.sleep(wait)
+        logger.error(f"Abandon téléchargement ArXiv PDF {paper.paper_id} après {len(_BACKOFF_SECONDS)} tentatives")
+        return None
 
     def clear_cache(self):
         _cache.clear()
