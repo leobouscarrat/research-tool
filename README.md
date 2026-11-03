@@ -58,6 +58,8 @@ uv sync
 uv run streamlit run app.py
 ```
 
+![Research Assistant: indexed papers tab](docs/screenshot.png)
+
 ### MCP server
 
 `mcp_server.py` exposes the research functions (themes, search, indexing, Q&A) as an MCP server, e.g. for Claude Code:
