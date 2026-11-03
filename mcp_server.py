@@ -11,6 +11,7 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(PROJECT_ROOT)
 sys.path.insert(0, PROJECT_ROOT)
 
+from langchain_core.messages import HumanMessage
 from mcp.server.fastmcp import FastMCP
 
 from core.paper_fetcher import download_and_index
@@ -23,7 +24,6 @@ from core.theme_manager import (
     list_themes,
     sync_papers_from_disk,
 )
-from langchain_core.messages import HumanMessage
 
 mcp = FastMCP("research-tool")
 

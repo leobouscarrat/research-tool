@@ -22,6 +22,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pytest>=8.0",
     "ruff>=0.9.0",
 ]
 
@@ -32,3 +33,10 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# The working directory and sys.path must be set before the project imports.
+"mcp_server.py" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
